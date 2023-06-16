@@ -1,0 +1,292 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Transform: AWS::Serverless-2016-10-31
+
+Description: A collection of CloudFormation Macros
+
+Resources:
+
+  Boto3Function:
+    Type: AWS::Serverless::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: VPC not required.
+          - id: W92
+            reason: Reserved concurrency not required.
+          - id: W44
+            reason: Boto3 CR needs high permissions to be universally capable.
+    Properties:
+      Runtime: python3.9
+      Handler: index.handler
+      Policies: PowerUserAccess
+      InlineCode: |
+        import datetime
+        import json
+        import boto3
+        import cfnresponse
+        import jmespath
+        def handler(event, context):
+            print(json.dumps(event, default=default))
+            try:
+                if event['RequestType'] == 'Delete':
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, None)
+                else:
+                    props = event["ResourceProperties"]
+                    client = boto3.client(props['Service'], region_name=props['Region'])
+                    function = getattr(client, props['Action'])
+                    if 'Parameters' in props:
+                        response = function(**props['Parameters'])
+                    else:
+                        response = function()
+                    print(json.dumps(response, default=default))
+                    if 'ResponsePath' in props['PhysicalResourceId']:
+                        physical_resource_id = jmespath.search(props['PhysicalResourceId']['ResponsePath'], response)
+                    else:
+                        physical_resource_id = props['PhysicalResourceId']['Id']
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, physical_resource_id)
+            except Exception as ex:
+                cfnresponse.send(event, context, cfnresponse.FAILED, None, context.aws_request_id)
+                raise
+        def default(o):
+            if isinstance(o, datetime.datetime):
+                return o.__str__()
+
+  CountMacroFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: VPC not required.
+          - id: W92
+            reason: Reserved concurrency not required.
+    Properties:
+      Handler: index.handler
+      Runtime: python3.9
+      InlineCode: |
+        import copy
+        import json
+        import os
+        def process(tem,params):
+        	new_tem = copy.deepcopy(tem)
+        	status = 'success'
+        	for n, r in tem['Resources'].items():
+        		if 'Count' in r:
+        			if isinstance(new_tem['Resources'][n]['Count'], dict):
+        				ref = new_tem['Resources'][n]['Count'].pop('Ref')
+        				c_str = str(params[ref])
+        				new_tem['Resources'][n].pop('Count')
+        			else:
+        				c_str = str(new_tem['Resources'][n].pop('Count'))
+        			if c_str.isnumeric():
+        				c = int(c_str)
+        			elif '[' in c_str:
+        				c = json.loads(c_str.replace("'", '"'))
+        			else:
+        				c = [c_str]
+        			if 'StartAfter' in new_tem['Resources'][n]:
+        				if isinstance(new_tem['Resources'][n]['StartAfter'], dict):
+        					ref = new_tem['Resources'][n]['StartAfter'].pop('Ref')
+        					if ref == 'AWS::Region':
+        						sa = os.environ['AWS_REGION']
+        					else:
+        						sa = str(params[ref])
+        					new_tem['Resources'][n].pop('StartAfter')
+        				else:
+        					sa = str(new_tem['Resources'][n].pop('StartAfter'))
+        				print("Found 'StartAfter' property with value {} in '{}' resource....".format(sa,n))
+        			else:
+        				sa = None
+        			print("Found 'Count' property with value {} in '{}' resource....multiplying!".format(c,n))
+        			res = new_tem['Resources'].pop(n)
+        			new_res = multiply(n, res, c, sa)
+        			if not set(new_res.keys()) & set(new_tem['Resources'].keys()):
+        				new_tem['Resources'].update(new_res)
+        			else:
+        				status = 'failed'
+        				return status, tem
+        		else:
+        			print("Did not find 'Count' property in '{}' resource....Nothing to do!".format(n))
+        	return status, new_tem
+        def update_placeholder(struct, i, v=None):
+        	r_str = json.dumps(struct)
+        	dph_count = r_str.count('%d')
+        	sph_count = 0 if v is None else r_str.count('%s')
+        	if dph_count > 0:
+        		print("Found {} occurrences of decimal placeholder in JSON, replacing with iterator {}".format(dph_count, i))
+        		r_str = r_str.replace('%d', str(i))
+        	if sph_count > 0:
+        		print("Found {} occurrences of string placeholder in JSON, replacing with value {}".format(sph_count, v))
+        		r_str = r_str.replace('%s', str(v))
+        	if dph_count > 0 or sph_count > 0:
+        		return json.loads(r_str)
+        	else:
+        		print("No occurences of decimal placeholder found in JSON, therefore nothing will be replaced")
+        		return struct
+        def multiply(res_name, res_struct, c, sa):
+        	new_res = {}
+        	if isinstance(c, int):
+        		for iteration in range(c):
+        			print("Multiplying '{}', iteration count {}".format(res_name,iteration))
+        			multipliedResourceStructure = update_placeholder(res_struct,iteration)
+        			new_res[res_name+str(iteration)] = multipliedResourceStructure
+        	else:
+        		if sa:
+        			for iteration, value in enumerate(c[c.index(sa)+1:]):
+        				print("Multiplying '{}', iteration count {}".format(res_name,iteration))
+        				multipliedResourceStructure = update_placeholder(res_struct,iteration,value)
+        				new_res[res_name+str(iteration)] = multipliedResourceStructure
+        		else:
+        			for iteration, value in enumerate(c):
+        				print("Multiplying '{}', iteration count {}".format(res_name,iteration))
+        				multipliedResourceStructure = update_placeholder(res_struct,iteration,value)
+        				new_res[res_name+str(iteration)] = multipliedResourceStructure
+        	return new_res
+        def handler(event, context):
+        	result = process(event['fragment'],event['templateParameterValues'])
+        	return {
+        		'requestId': event['requestId'],
+        		'status': result[0],
+        		'fragment': result[1],
+        	}
+
+  CountMacro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: Count
+      FunctionName: !GetAtt CountMacroFunction.Arn
+
+  ListStringToDictMacroFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: VPC not required.
+          - id: W92
+            reason: Reserved concurrency not required.
+    Properties:
+      Handler: index.handler
+      Runtime: python3.9
+      InlineCode: |
+        import json
+        def handler(event, context):
+            response = {
+                'requestId': event['requestId'],
+                'status': 'success'
+            }
+            try:
+                list_str = event['params']['List']
+                template_string = event['params']['Template']
+                list_dict = []
+                for value in list_str:
+                    list_dict.append(json.loads(template_string.replace('%s', value)))
+                response['fragment'] = list_dict
+            except Exception as e:
+                response['status'] = 'failure'
+                response['errorMessage'] = str(e)
+            return response
+
+  ListStringToDictMacro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: ListStringToDict
+      FunctionName: !GetAtt ListStringToDictMacroFunction.Arn
+
+  GetIpamPoolMacroFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: VPC not required.
+          - id: W92
+            reason: Reserved concurrency not required.
+          - id: W11
+            reason: DescribeIpamPools does not support resource level policy.
+    Properties:
+      Handler: index.handler
+      Runtime: python3.9
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:DescribeIpamPools
+              Resource: '*'
+      InlineCode: |
+        import boto3
+        def handler(event, context):
+            response = {
+                'requestId': event['requestId'],
+                'status': 'success'
+            }
+            try:
+                ec2 = boto3.client('ec2', region_name=event['params']['SourceIpamPoolRegion'])
+                describe_ipam_pools = ec2.describe_ipam_pools()
+                pools = describe_ipam_pools['IpamPools']
+                while 'NextToken' in describe_ipam_pools:
+                    describe_ipam_pools = ec2.describe_ipam_pools(NextToken=describe_ipam_pools['NextToken'])
+                    pools.extend(describe_ipam_pools['IpamPools'])
+                locale_pools = [p for p in pools if 'SourceIpamPoolId' in p and p['SourceIpamPoolId'] == event['params']['SourceIpamPoolId'] and  p['Locale'] == event['region']]
+                if len(locale_pools) > 0:
+                    response['fragment'] = locale_pools[0]['IpamPoolId']
+                else:
+                    response['status'] = 'failure'
+                    response['errorMessage'] = 'No IpamPool found with locale for this region.'
+            except Exception as e:
+                response['status'] = 'failure'
+                response['errorMessage'] = str(e)
+            return response
+
+  GetIpamPoolMacro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: GetIpamPoolId
+      FunctionName: !GetAtt GetIpamPoolMacroFunction.Arn
+
+  VpcSizeMacroFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: VPC not required.
+          - id: W92
+            reason: Reserved concurrency not required.
+    Properties:
+      Handler: index.handler
+      Runtime: python3.9
+      InlineCode: |
+        import math
+        def handler(event, context):
+            response = {
+                'requestId': event['requestId'],
+                'status': 'success'
+            }
+            try:
+                az_count = int(event['params']['AzCount'])
+                sizes = [int(s) for s in event['params']['Sizes']]
+                total_ips = math.fsum([(0 if s == 0 else ip_count(s, az_count)) for s in sizes])
+                response['fragment'] = 0 if total_ips == 0.0 else (32 - math.ceil(math.log(total_ips,2)))
+            except Exception as e:
+                response['status'] = 'failure'
+                response['errorMessage'] = str(e)
+            return response
+        def ip_count(cidr_size, az_count):
+            return int(math.pow(2, 32 - cidr_size)) * az_count
+
+  VpcSizeMacro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: CalculateVpcSize
+      FunctionName: !GetAtt VpcSizeMacroFunction.Arn
+
+Outputs:
+
+  Boto3FunctionArn:
+    Export:
+      Name: Boto3FunctionArn
+    Value: !GetAtt Boto3Function.Arn

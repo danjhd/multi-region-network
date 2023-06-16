@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+
+  Name:
+    Type: String
+
+Resources:
+
+  Tgw:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      AmazonSideAsn: 64512
+      AutoAcceptSharedAttachments: enable
+      DefaultRouteTableAssociation: disable
+      DefaultRouteTablePropagation: disable
+      DnsSupport: enable
+      VpnEcmpSupport: enable
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::Region
+
+#  TransitGatewayShare:
+#    Type: AWS::RAM::ResourceShare
+#    Properties:
+#      Name: !Sub Transit Gateway - ${AWS::Region}
+#      ResourceArns:
+#        - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:transit-gateway/${Tgw}
+#      Principals:
+#        - !Sub arn:${AWS::Partition}:organizations::${AWS::AccountId}:organization/${OrganizationId}
+
+  AttachmentVpc:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      SubnetIds: !Split
+        - ','
+        - 'Fn::ImportValue': !Sub ${Name}-TransitSubnetIds
+      TransitGatewayId: !Ref Tgw
+      VpcId:
+        'Fn::ImportValue': !Sub ${Name}-VpcId
+      Tags:
+        - Key: Name
+          Value:
+            'Fn::ImportValue': !Sub ${Name}-VpcCidr
+
+  RouteTableVpc:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: !Ref Tgw
+      Tags:
+        - Key: Name
+          Value: VPCs
+
+  RouteTableVpn:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: !Ref Tgw
+      Tags:
+        - Key: Name
+          Value: VPNs
+
+  RouteTablePeer:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: !Ref Tgw
+      Tags:
+        - Key: Name
+          Value: Peers
+
+  RouteTableAssociationVpc:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayAttachmentId: !Ref AttachmentVpc
+      TransitGatewayRouteTableId: !Ref RouteTableVpc
+
+  RouteTablePropagationVpc:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayAttachmentId: !Ref AttachmentVpc
+      TransitGatewayRouteTableId: !Ref RouteTableVpc
+
+  RouteTablePropagationVpn:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayAttachmentId: !Ref AttachmentVpc
+      TransitGatewayRouteTableId: !Ref RouteTableVpn
+
+  RouteTablePropagationPeer:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayAttachmentId: !Ref AttachmentVpc
+      TransitGatewayRouteTableId: !Ref RouteTablePeer
+
+  PeerCreationFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: VPC not required.
+          - id: W92
+            reason: Reserved concurrency not required.
+          - id: W11
+            reason: Resource level permissions not possible.
+    Properties:
+      Runtime: python3.9
+      Handler: index.handler
+      Timeout: 300
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:DescribeTransitGatewayPeeringAttachments
+                - ec2:AcceptTransitGatewayPeeringAttachment
+                - cloudformation:ListExports
+                - ec2:AssociateTransitGatewayRouteTable
+                - ec2:CreateTags
+              Resource: '*'
+      Events:
+        CloudTrail:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - aws.ec2
+              detail-type:
+                - AWS API Call via CloudTrail
+              detail:
+                eventSource:
+                  - ec2.amazonaws.com
+                eventName:
+                  - CreateTransitGatewayPeeringAttachment
+      InlineCode: |
+        import json
+        import time
+        import boto3
+        from botocore.exceptions import ClientError
+        def handler(event, context):
+            print(json.dumps(event))
+            details = event['detail']['responseElements']['CreateTransitGatewayPeeringAttachmentResponse']
+            ec2 = boto3.client('ec2', region_name = details['transitGatewayPeeringAttachment']['accepterTgwInfo']['region'])
+            cfn = boto3.client('cloudformation', region_name = details['transitGatewayPeeringAttachment']['accepterTgwInfo']['region'])
+            while True:
+                try:
+                    describe = ec2.describe_transit_gateway_peering_attachments(TransitGatewayAttachmentIds = [details['transitGatewayPeeringAttachment']['transitGatewayAttachmentId']])
+                    break
+                except ClientError as error:
+                    if error.response['Error']['Code'] == 'InvalidTransitGatewayAttachmentID.NotFound':
+                        time.sleep(10)
+                        pass
+                    else:
+                        raise error
+            while describe['TransitGatewayPeeringAttachments'][0]['State'] != 'pendingAcceptance':
+                time.sleep(10)
+                describe = ec2.describe_transit_gateway_peering_attachments(TransitGatewayAttachmentIds = [details['transitGatewayPeeringAttachment']['transitGatewayAttachmentId']])
+            ec2.create_tags(
+                Resources = [details['transitGatewayPeeringAttachment']['transitGatewayAttachmentId']],
+                Tags = [{'Key': 'Name', 'Value': f"AWS - {details['transitGatewayPeeringAttachment']['requesterTgwInfo']['region']}"}]
+            )
+            accept = ec2.accept_transit_gateway_peering_attachment(TransitGatewayAttachmentId = details['transitGatewayPeeringAttachment']['transitGatewayAttachmentId'])
+            print(accept)
+            time.sleep(10)
+            while describe['TransitGatewayPeeringAttachments'][0]['State'] != 'available':
+                time.sleep(10)
+                describe = ec2.describe_transit_gateway_peering_attachments(TransitGatewayAttachmentIds = [details['transitGatewayPeeringAttachment']['transitGatewayAttachmentId']])
+            list_exports = cfn.list_exports()
+            exports = list_exports['Exports']
+            while 'NextToken' in list_exports:
+                list_exports = cfn.list_exports(NextToken = list_exports['NextToken'])
+                exports.extend(list_exports['Exports'])
+            peer_route_table_id = [e['Value'] for e in exports if e['Name'].endswith('-PeerRouteTableId')][0]
+            associate = ec2.associate_transit_gateway_route_table(
+                TransitGatewayAttachmentId = details['transitGatewayPeeringAttachment']['transitGatewayAttachmentId'],
+                TransitGatewayRouteTableId = peer_route_table_id
+            )
+            print(associate)
+
+Outputs:
+
+  TransitGatewayId:
+    Export:
+      Name: !Sub ${Name}-TransitGatewayId
+    Value: !Ref Tgw
+
+  VpcRouteTableId:
+    Export:
+      Name: !Sub ${Name}-VpcRouteTableId
+    Value: !Ref RouteTableVpc
+
+  VpnRouteTableId:
+    Export:
+      Name: !Sub ${Name}-VpnRouteTableId
+    Value: !Ref RouteTableVpn
+
+  PeerRouteTableId:
+    Export:
+      Name: !Sub ${Name}-PeerRouteTableId
+    Value: !Ref RouteTablePeer

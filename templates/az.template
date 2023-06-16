@@ -1,0 +1,220 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+
+  Name:
+    Type: String
+
+  AzNumber:
+    Type: Number
+
+  PublicSubnetCidr:
+    Type: String
+
+  PrivateSubnetCidr:
+    Type: String
+
+  DataSubnetCidr:
+    Type: String
+
+  TransitSubnetCidr:
+    Type: String
+
+  VpcId:
+    Type: String
+
+  IgwId:
+    Type: String
+
+Conditions:
+
+  CreatePrivate: !Not [!Equals [!Ref PrivateSubnetCidr, '']]
+
+  CreateData: !Not [!Equals [!Ref DataSubnetCidr, '']]
+
+  CreateTransit: !Not [!Equals [!Ref TransitSubnetCidr, '']]
+
+Resources:
+
+  Eip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/Eip${AzNumber}
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W33
+            reason: This is a public subnet.
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Select 
+        - !Ref AzNumber
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      CidrBlock: !Ref PublicSubnetCidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: subnet-type
+          Value: Public
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/PublicSubnet${AzNumber}
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/PublicRouteTable${AzNumber}
+
+  RoutePublic:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IgwId
+
+  SubnetRouteTableAssociationPublic:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  NatGw:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      AllocationId: !GetAtt Eip.AllocationId
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/NatGw${AzNumber}
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivate
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Select 
+        - !Ref AzNumber
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      CidrBlock: !Ref PrivateSubnetCidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: subnet-type
+          Value: Private
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/PrivateSubnet${AzNumber}
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreatePrivate
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/PrivateRouteTable${AzNumber}
+
+  RoutePrivate:
+    Type: AWS::EC2::Route
+    Condition: CreatePrivate
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGw
+
+  SubnetRouteTableAssociationPrivate:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivate
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  DataSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateData
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Select 
+        - !Ref AzNumber
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      CidrBlock: !Ref DataSubnetCidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: subnet-type
+          Value: Isolated
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/DataSubnet${AzNumber}
+
+  DataRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateData
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/DataRouteTable${AzNumber}
+
+  SubnetRouteTableAssociationData:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateData
+    Properties:
+      SubnetId: !Ref DataSubnet
+      RouteTableId: !Ref DataRouteTable
+
+  TransitSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateTransit
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Select 
+        - !Ref AzNumber
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      CidrBlock: !Ref TransitSubnetCidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: subnet-type
+          Value: Isolated
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/TransitSubnet${AzNumber}
+
+  TransitRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateTransit
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/TransitRouteTable${AzNumber}
+
+  SubnetRouteTableAssociationTransit:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateTransit
+    Properties:
+      SubnetId: !Ref TransitSubnet
+      RouteTableId: !Ref TransitRouteTable
+
+Outputs:
+
+  PublicRouteTableId:
+    Value: !Ref PublicRouteTable
+
+  PrivateRouteTableId:
+    Value: !If [CreatePrivate, !Ref PrivateRouteTable, !Ref 'AWS::NoValue']
+
+  DataRouteTableId:
+    Value: !If [CreateData, !Ref DataRouteTable, !Ref 'AWS::NoValue']
+
+  TransitRouteTableId:
+    Value: !If [CreateTransit, !Ref TransitRouteTable, !Ref 'AWS::NoValue']
+
+  TransitSubnetId:
+    Value: !If [CreateTransit, !Ref TransitSubnet, !Ref 'AWS::NoValue']

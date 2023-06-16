@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+
+  Name:
+    Type: String
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+Resources:
+
+  SubnetId:
+    Type: Custom::SubnetId
+    Properties:
+      ServiceToken: !ImportValue Boto3FunctionArn
+      Region: !Ref AWS::Region
+      Service: ec2
+      Action: describe_subnets
+      Parameters:
+        Filters:
+          - Name: 'availability-zone'
+            Values:
+              - !Select
+                  - 0
+                  - !GetAZs 
+                    Ref: 'AWS::Region'
+          - Name: 'tag:subnet-type'
+            Values:
+              - 'Private'
+      PhysicalResourceId:
+        ResponsePath: 'Subnets[0].SubnetId'
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      ImageId: !Ref LatestAmiId
+      InstanceType: t2.micro
+      SecurityGroupIds:
+        - 'Fn::ImportValue': !Sub ${Name}-HomeSecurityGroupId
+      SubnetId: !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: VPN tester

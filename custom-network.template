@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+
+  Name:
+    Type: String
+    Default: custom-vpc
+
+  AwsCidr:
+    Type: String
+    Default: 10.0.0.0/8
+
+  HomeCidr:
+    Type: String
+    Default: 192.168.16.0/20
+
+  OperatingRegions:
+    Type: CommaDelimitedList
+    Default: us-east-1,eu-west-1,eu-west-2,eu-central-1,us-west-2
+
+  HomeVLans:
+    Type: CommaDelimitedList
+    Default: LAN,Home,IoT,Lab,Guest
+
+  OrganizationId:
+    Type: String
+    Default: o-xdtqf2s8wf
+
+  AzCount:
+    Type: Number
+    Default: 3
+
+  SubnetSizes:
+    Type: List<Number>
+    Default: 22,22,23,23
+
+  HomePublicIp:
+    Type: String
+    Default: 86.153.205.58
+
+Resources:
+
+  IpamStack:
+    Type: AWS::CloudFormation::Stack
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/ipam.template
+      Parameters:
+        AwsCidr: !Ref AwsCidr
+        HomeCidr: !Ref HomeCidr
+        OperatingRegions: !Join [',', !Ref OperatingRegions]
+        HomeVLans: !Join [',', !Ref HomeVLans]
+
+  VpcStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties:
+      StackSetName: vpc
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/vpc.template
+      PermissionModel: SELF_MANAGED
+      AdministrationRoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/AWSCloudFormationStackSetAdministrationRole
+      ExecutionRoleName: AWSCloudFormationStackSetExecutionRole
+      CallAs: SELF
+      Capabilities:
+        - CAPABILITY_IAM
+        - CAPABILITY_AUTO_EXPAND
+      ManagedExecution:
+        Active: True
+      OperationPreferences:
+        FailureTolerancePercentage: 0
+        MaxConcurrentPercentage: 100
+        RegionConcurrencyType: PARALLEL
+      StackInstancesGroup:
+        - DeploymentTargets:
+            Accounts:
+              - !Ref AWS::AccountId
+          Regions: !Ref OperatingRegions
+      Parameters:
+        - ParameterKey: FlowLogBucket
+          ParameterValue: !Sub ${OrganizationId}-logging
+        - ParameterKey: Name
+          ParameterValue: !Ref Name
+        - ParameterKey: SourceIpamPoolRegion
+          ParameterValue: !Ref AWS::Region
+        - ParameterKey: SourceIpamPoolId
+          ParameterValue: !GetAtt IpamStack.Outputs.AwsPoolId
+        - ParameterKey: AzCount
+          ParameterValue: !Ref AzCount
+        - ParameterKey: PublicSubnetSize
+          ParameterValue: !Select [0, !Ref SubnetSizes]
+        - ParameterKey: PrivateSubnetSize
+          ParameterValue: !Select [1, !Ref SubnetSizes]
+        - ParameterKey: DataSubnetSize
+          ParameterValue: !Select [2, !Ref SubnetSizes]
+        - ParameterKey: TransitSubnetSize
+          ParameterValue: !Select [3, !Ref SubnetSizes]
+
+  TgwStackSet:
+    Type: AWS::CloudFormation::StackSet
+    DependsOn: VpcStackSet
+    Properties:
+      StackSetName: tgw
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/tgw.template
+      PermissionModel: SELF_MANAGED
+      AdministrationRoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/AWSCloudFormationStackSetAdministrationRole
+      ExecutionRoleName: AWSCloudFormationStackSetExecutionRole
+      CallAs: SELF
+      Capabilities:
+        - CAPABILITY_IAM
+        - CAPABILITY_AUTO_EXPAND
+      ManagedExecution:
+        Active: True
+      OperationPreferences:
+        FailureTolerancePercentage: 0
+        MaxConcurrentPercentage: 100
+        RegionConcurrencyType: PARALLEL
+      StackInstancesGroup:
+        - DeploymentTargets:
+            Accounts:
+              - !Ref AWS::AccountId
+          Regions: !Ref OperatingRegions
+      Parameters:
+        - ParameterKey: Name
+          ParameterValue: !Ref Name
+
+  PeeringStackSet:
+    Type: AWS::CloudFormation::StackSet
+    DependsOn: TgwStackSet
+    Properties:
+      StackSetName: tgw-peering
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/peering.template
+      PermissionModel: SELF_MANAGED
+      AdministrationRoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/AWSCloudFormationStackSetAdministrationRole
+      ExecutionRoleName: AWSCloudFormationStackSetExecutionRole
+      CallAs: SELF
+      Capabilities:
+        - CAPABILITY_IAM
+        - CAPABILITY_AUTO_EXPAND
+      ManagedExecution:
+        Active: True
+      OperationPreferences:
+        FailureTolerancePercentage: 0
+        MaxConcurrentPercentage: 100
+        RegionConcurrencyType: PARALLEL
+      StackInstancesGroup:
+        - DeploymentTargets:
+            Accounts:
+              - !Ref AWS::AccountId
+          Regions: !Ref OperatingRegions
+      Parameters:
+        - ParameterKey: Name
+          ParameterValue: !Ref Name
+        - ParameterKey: StackSetDeployedRegions
+          ParameterValue: !Join  [',', !Ref OperatingRegions]
+
+  VpnStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: PeeringStackSet
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/vpn.template
+      Parameters:
+        Name: !Ref Name
+        HomePublicIp: !Ref HomePublicIp
+
+  RoutesStackSet:
+    Type: AWS::CloudFormation::StackSet
+    DependsOn: VpnStack
+    Properties:
+      StackSetName: routes
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/routes.template
+      PermissionModel: SELF_MANAGED
+      AdministrationRoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/AWSCloudFormationStackSetAdministrationRole
+      ExecutionRoleName: AWSCloudFormationStackSetExecutionRole
+      CallAs: SELF
+      Capabilities:
+        - CAPABILITY_IAM
+        - CAPABILITY_AUTO_EXPAND
+      ManagedExecution:
+        Active: True
+      OperationPreferences:
+        FailureTolerancePercentage: 0
+        MaxConcurrentPercentage: 100
+        RegionConcurrencyType: PARALLEL
+      StackInstancesGroup:
+        - DeploymentTargets:
+            Accounts:
+              - !Ref AWS::AccountId
+          Regions: !Ref OperatingRegions
+      Parameters:
+        - ParameterKey: Name
+          ParameterValue: !Ref Name
+        - ParameterKey: AzCount
+          ParameterValue: !Ref AzCount
+        - ParameterKey: HomeCidr
+          ParameterValue: !Ref HomeCidr
+        - ParameterKey: StackSetDeployedRegions
+          ParameterValue: !Join  [',', !Ref OperatingRegions]
+        - ParameterKey: VpnRegion
+          ParameterValue: !Ref AWS::Region
+
+  Ec2Stack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: RoutesStackSet
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/ec2.template
+      Parameters:
+        Name: !Ref Name

@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Transform: Count
+
+Parameters:
+
+  AwsCidr:
+    Type: String
+
+  HomeCidr:
+    Type: String
+
+  OperatingRegions:
+    Type: CommaDelimitedList
+
+  HomeVLans:
+    Type: CommaDelimitedList
+
+Resources:
+
+  Ipam:
+    Type: AWS::EC2::IPAM
+    Properties:
+      OperatingRegions:
+        'Fn::Transform':
+          Name: ListStringToDict
+          Parameters:
+            List: !Ref OperatingRegions
+            Template: '{"RegionName": "%s"}'
+
+  HomePool:
+    Type: AWS::EC2::IPAMPool
+    Properties: 
+      AddressFamily: ipv4
+      IpamScopeId: !GetAtt Ipam.PrivateDefaultScopeId
+      ProvisionedCidrs:
+        - Cidr: !Ref HomeCidr
+      Tags: 
+        - Key: Name
+          Value: Home
+
+  Allocation:
+    Type: AWS::EC2::IPAMAllocation
+    Count: !Ref HomeVLans
+    Properties:
+      Description: '%s'
+      Cidr: !Select ['%d', !Cidr [!Ref HomeCidr, 16, 8]]
+      IpamPoolId: !Ref HomePool
+
+  AwsPool:
+    Type: AWS::EC2::IPAMPool
+    Properties:
+      AddressFamily: ipv4
+      IpamScopeId: !GetAtt Ipam.PrivateDefaultScopeId
+      ProvisionedCidrs:
+        - Cidr: !Ref AwsCidr
+      Tags: 
+        - Key: Name
+          Value: AWS
+
+  Pool:
+    Type: AWS::EC2::IPAMPool
+    Count: !Ref OperatingRegions
+    Properties:
+      AddressFamily: ipv4
+      AutoImport: True
+      IpamScopeId: !GetAtt Ipam.PrivateDefaultScopeId
+      Locale: '%s'
+      ProvisionedCidrs:
+        - Cidr: !Select ['%d', !Cidr [ !Ref AwsCidr, 256, 14 ]]
+      SourceIpamPoolId: !Ref AwsPool
+      Tags:
+        - Key: Name
+          Value: 'AWS - %s'
+
+Outputs:
+
+  AwsPoolId:
+    Value: !Ref AwsPool

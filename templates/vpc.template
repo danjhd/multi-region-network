@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Transform:
+  - Count
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+
+  FlowLogBucket:
+    Type: String
+
+  Name:
+    Type: String
+
+  SourceIpamPoolRegion:
+    Type: String
+
+  SourceIpamPoolId:
+    Type: String
+
+  AzCount:
+    Type: Number
+
+  PublicSubnetSize:
+    Type: Number
+
+  PrivateSubnetSize:
+    Type: Number
+
+  DataSubnetSize:
+    Type: Number
+
+  TransitSubnetSize:
+    Type: Number
+
+Conditions:
+
+  Az2: !Or [ !Equals [!Ref AzCount, 2], !Condition Az3]
+
+  Az3: !Equals [!Ref AzCount, 3]
+
+Resources:
+
+  GetCidrFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: VPC not required.
+          - id: W92
+            reason: Reserved concurrency not required.
+    Properties:
+      Runtime: python3.9
+      Handler: index.handler
+      InlineCode: |
+        import cfnresponse
+        import ctypes
+        def handler(event, context):
+            try:
+                if event['RequestType'] == 'Delete':
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, None)
+                else:
+                    response = {}
+                    props = event["ResourceProperties"]
+                    base_ip = props['VpcCidr'].split('/')[0]
+                    for subnet_size in props['Sizes']:
+                        for subnet, size in subnet_size.items():
+                            for az in range(int(props['AZs'])):
+                                subnet_cidr = ''
+                                if int(size) != 0:
+                                    subnet_cidr = f'{base_ip}/{size}'
+                                    base_ip = convertIP(lastIp(parseIP(base_ip), int(size))+1)
+                                response[f'{subnet}-{az}'] = subnet_cidr
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, response, context.aws_request_id)
+            except Exception as ex:
+                cfnresponse.send(event, context, cfnresponse.FAILED, None, context.aws_request_id)
+                raise
+        def parseIP(s):
+            a = s.split('.')
+            l = len(a)
+            res = 0
+            for i in range(3, -1, -1):
+                c = 0 if (i + l < 4) else int(a[3 - i])
+                res += ctypes.c_int(c << (i << 3)).value
+            return res
+        def convertIP(ip):
+            return '.'.join([
+                str(rshift(ip, 24) & 255),
+                str(rshift(ip, 16) & 255),
+                str(rshift(ip, 8) & 255),
+                str(rshift(ip, 0) & 255)]
+            )
+        def rshift(val, n):
+            return val >> n if val >= 0 else (val + 0x100000000) >> n
+        def netmask(cidr):
+            return -1 << (32 - cidr)
+        def network(ip, cidr):
+            return netmask(cidr) & ip
+        def lastIp(ip, cidr):
+            return network(ip, cidr) | ~netmask(cidr)
+
+  GetCidr:
+    Type: Custom::Cidr
+    Properties:
+      ServiceToken: !GetAtt GetCidrFunction.Arn
+      VpcCidr: !GetAtt Vpc.CidrBlock
+      AZs: !Ref AzCount
+      Sizes:
+        - Public: !Ref PublicSubnetSize
+        - Private: !Ref PrivateSubnetSize
+        - Data: !Ref DataSubnetSize
+        - Transit: !Ref TransitSubnetSize
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      Ipv4IpamPoolId:
+        'Fn::Transform':
+          Name: GetIpamPoolId
+          Parameters:
+            SourceIpamPoolRegion: !Ref SourceIpamPoolRegion
+            SourceIpamPoolId: !Ref SourceIpamPoolId
+      Ipv4NetmaskLength:
+        'Fn::Transform':
+          Name: CalculateVpcSize
+          Parameters:
+            AzCount: !Ref AzCount
+            Sizes:
+              - !Ref PublicSubnetSize
+              - !Ref PrivateSubnetSize
+              - !Ref DataSubnetSize
+              - !Ref TransitSubnetSize
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/Vpc
+
+  FlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceId: !Ref Vpc
+      ResourceType: VPC
+      TrafficType: ALL
+      LogDestinationType: s3
+      LogDestination: !Sub arn:${AWS::Partition}:s3:::${FlowLogBucket}
+      LogFormat: "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status} ${vpc-id} ${subnet-id} ${instance-id} ${tcp-flags} ${type} ${pkt-srcaddr} ${pkt-dstaddr}"
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name}-${AWS::Region}/Igw
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Igw
+
+  AzStack:
+    Type: AWS::CloudFormation::Stack
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Count: !Ref AzCount
+    Properties:
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/az.template
+      Parameters:
+        Name: !Ref Name
+        AzNumber: '%d'
+        PublicSubnetCidr: !GetAtt GetCidr.Public-%d
+        PrivateSubnetCidr: !GetAtt GetCidr.Private-%d
+        DataSubnetCidr: !GetAtt GetCidr.Data-%d
+        TransitSubnetCidr: !GetAtt GetCidr.Transit-%d
+        VpcId: !Ref Vpc
+        IgwId: !Ref Igw
+
+  GatewayEndpointS3:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !GetAtt AzStack0.Outputs.PublicRouteTableId
+        - !If [Az2, !GetAtt AzStack1.Outputs.PublicRouteTableId, !Ref 'AWS::NoValue']
+        - !If [Az3, !GetAtt AzStack2.Outputs.PublicRouteTableId, !Ref 'AWS::NoValue']
+        - !GetAtt AzStack0.Outputs.PrivateRouteTableId
+        - !If [Az2, !GetAtt AzStack1.Outputs.PrivateRouteTableId, !Ref 'AWS::NoValue']
+        - !If [Az3, !GetAtt AzStack2.Outputs.PrivateRouteTableId, !Ref 'AWS::NoValue']
+        - !GetAtt AzStack0.Outputs.DataRouteTableId
+        - !If [Az2, !GetAtt AzStack1.Outputs.DataRouteTableId, !Ref 'AWS::NoValue']
+        - !If [Az3, !GetAtt AzStack2.Outputs.DataRouteTableId, !Ref 'AWS::NoValue']
+        - !GetAtt AzStack0.Outputs.TransitRouteTableId
+        - !If [Az2, !GetAtt AzStack1.Outputs.TransitRouteTableId, !Ref 'AWS::NoValue']
+        - !If [Az3, !GetAtt AzStack2.Outputs.TransitRouteTableId, !Ref 'AWS::NoValue']
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W29
+            reason: Not relevant.
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: Endpoints
+      SecurityGroupEgress:
+        - CidrIp: 255.255.255.255/32
+          Description: Disallow all traffic
+          IpProtocol: icmp
+          FromPort: 252
+          ToPort: 86
+      SecurityGroupIngress:
+        - CidrIp: !GetAtt Vpc.CidrBlock
+          Description: !Sub from ${Vpc.CidrBlock}:443
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+      Tags:
+        - Key: Name
+          Value: VPCE Endpoints
+
+  InterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Count:
+      - ec2
+      - ec2messages
+      - ssm
+      - ssmmessages
+      - logs
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.%s'
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+      SubnetIds:
+        - !GetAtt AzStack0.Outputs.TransitSubnetId
+        - !If [Az2, !GetAtt AzStack1.Outputs.TransitSubnetId, !Ref 'AWS::NoValue']
+        - !If [Az3, !GetAtt AzStack2.Outputs.TransitSubnetId, !Ref 'AWS::NoValue']
+
+Outputs:
+
+  VpcId:
+    Export:
+      Name: !Sub ${Name}-VpcId
+    Value: !Ref Vpc
+
+  VpcCidr:
+    Export:
+      Name: !Sub ${Name}-VpcCidr
+    Value: !GetAtt Vpc.CidrBlock
+
+  TransitSubnetIds:
+    Export:
+      Name: !Sub ${Name}-TransitSubnetIds
+    Value: !Join
+      - ','
+      - - !GetAtt AzStack0.Outputs.TransitSubnetId
+        - !If [Az2, !GetAtt AzStack1.Outputs.TransitSubnetId, !Ref 'AWS::NoValue']
+        - !If [Az3, !GetAtt AzStack2.Outputs.TransitSubnetId, !Ref 'AWS::NoValue']

@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Transform:
+  - Count
+
+Parameters:
+
+  Name:
+    Type: String
+
+  AzNumber:
+    Type: Number
+
+  HomeCidr:
+    Type: String
+
+  OtherRegions:
+    Type: CommaDelimitedList
+
+Resources:
+
+  PrivateRouteTableId:
+    Type: Custom::RouteTableId
+    Properties:
+      ServiceToken: !ImportValue Boto3FunctionArn
+      Region: !Ref AWS::Region
+      Service: ec2
+      Action: describe_route_tables
+      Parameters:
+        Filters:
+          - Name: 'tag:Name'
+            Values:
+              - !Sub ${Name}-${AWS::Region}/PrivateRouteTable${AzNumber}
+      PhysicalResourceId:
+        ResponsePath: 'RouteTables[0].RouteTableId'
+
+  PrivateHomeRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableId
+      DestinationCidrBlock: !Ref HomeCidr
+      TransitGatewayId:
+        'Fn::ImportValue': !Sub ${Name}-TransitGatewayId
+
+  VpcCidrRegion:
+    Type: Custom::VpcCidrRegion
+    Count: !Ref OtherRegions
+    Properties:
+      ServiceToken: !ImportValue Boto3FunctionArn
+      Region: '%s'
+      Service: ec2
+      Action: describe_vpcs
+      Parameters:
+        Filters:
+          - Name: 'tag:Name'
+            Values:
+              - !Sub ${Name}-%s/Vpc
+      PhysicalResourceId:
+        ResponsePath: 'Vpcs[0].CidrBlock'
+
+  PrivateRegionRoute:
+    Type: AWS::EC2::Route
+    Count: !Ref OtherRegions
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableId
+      DestinationCidrBlock: !Ref VpcCidrRegion%d
+      TransitGatewayId:
+        'Fn::ImportValue': !Sub ${Name}-TransitGatewayId

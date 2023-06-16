@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+
+  Name:
+    Type: String
+
+  HomePublicIp:
+    Type: String
+
+Resources:
+
+  Cgw:
+    Type: AWS::EC2::CustomerGateway
+    Properties:
+      BgpAsn: 65000
+      IpAddress: !Ref HomePublicIp
+      Type: ipsec.1
+      Tags:
+        - Key: Name
+          Value: Home
+
+  Vpn:
+    Type: AWS::EC2::VPNConnection
+    Properties:
+      CustomerGatewayId: !Ref Cgw
+      TransitGatewayId:
+        'Fn::ImportValue': !Sub ${Name}-TransitGatewayId
+      Type: ipsec.1
+      StaticRoutesOnly: true
+      Tags:
+        - Key: Name
+          Value: !Sub Home-${AWS::Region}
+
+  TransitGatewayAttachmentId:
+    Type: Custom::TransitGatewayAttachmentId
+    Properties:
+      ServiceToken: !ImportValue Boto3FunctionArn
+      Region: !Ref AWS::Region
+      Service: ec2
+      Action: describe_transit_gateway_attachments
+      Parameters:
+        Filters:
+          - Name: transit-gateway-id
+            Values:
+              - 'Fn::ImportValue': !Sub ${Name}-TransitGatewayId
+          - Name: resource-id
+            Values:
+              - !Ref Vpn
+      PhysicalResourceId:
+        ResponsePath: 'TransitGatewayAttachments[0].TransitGatewayAttachmentId'
+
+  TransitGatewayAttachmentTag:
+    Type: Custom::TransitGatewayAttachmentTag
+    Properties:
+      ServiceToken: !ImportValue Boto3FunctionArn
+      Region: !Ref AWS::Region
+      Service: ec2
+      Action: create_tags
+      Parameters:
+        Resources:
+          - !Ref TransitGatewayAttachmentId
+        Tags:
+          - Key: Name
+            Value: !Sub Home-${AWS::Region}
+      PhysicalResourceId:
+        Id: vpn-attach-tag
+
+  RouteTableAssociationVpn:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayRouteTableId:
+        'Fn::ImportValue': !Sub ${Name}-VpnRouteTableId
+      TransitGatewayAttachmentId: !Ref TransitGatewayAttachmentId
+
+Outputs:
+
+  VpnTransitGatewayAttachmentId:
+    Export:
+      Name: !Sub ${Name}-VpnTransitGatewayAttachmentId
+    Value: !Ref TransitGatewayAttachmentId

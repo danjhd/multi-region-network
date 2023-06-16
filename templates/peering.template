@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Transform: Count
+
+Parameters:
+
+  Name:
+    Type: String
+
+  StackSetDeployedRegions:
+    Type: CommaDelimitedList
+
+Resources:
+
+  Placeholder:
+    Type: AWS::CDK::Metadata
+
+  PeerTransitGatewayId:
+    Type: Custom::TransitGatewayAttachmentId
+    Count: !Ref StackSetDeployedRegions
+    StartAfter: !Ref AWS::Region
+    Properties:
+      ServiceToken: !ImportValue Boto3FunctionArn
+      Region: '%s'
+      Service: ec2
+      Action: describe_transit_gateways
+      PhysicalResourceId:
+        ResponsePath: 'TransitGateways[0].TransitGatewayId'
+
+  PeerAttachment:
+    Type: AWS::EC2::TransitGatewayPeeringAttachment
+    Count: !Ref StackSetDeployedRegions
+    StartAfter: !Ref AWS::Region
+    Properties:
+      TransitGatewayId:
+        'Fn::ImportValue': !Sub ${Name}-TransitGatewayId
+      PeerAccountId: !Ref AWS::AccountId
+      PeerRegion: '%s'
+      PeerTransitGatewayId: !Ref PeerTransitGatewayId%d
+      Tags:
+        - Key: Name
+          Value: 'AWS - %s'
+
+  RouteTableAssociationPeer:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Count: !Ref StackSetDeployedRegions
+    StartAfter: !Ref AWS::Region
+    Properties:
+      TransitGatewayAttachmentId: !Ref PeerAttachment%d
+      TransitGatewayRouteTableId:
+        'Fn::ImportValue': !Sub ${Name}-PeerRouteTableId

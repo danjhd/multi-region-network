@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Transform:
+  - Count
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+
+  Name:
+    Type: String
+
+  AzCount:
+    Type: Number
+
+  HomeCidr:
+    Type: String
+
+  StackSetDeployedRegions:
+    Type: CommaDelimitedList
+
+  VpnRegion:
+    Type: String
+
+Resources:
+
+  HomeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F1000
+            reason: All traffic outbound required.
+          - id: W42
+            reason: Private access only so all access expected.
+    Properties:
+      VpcId:
+        'Fn::ImportValue': !Sub ${Name}-VpcId
+      GroupDescription: Home
+      SecurityGroupIngress:
+        - Description: Home
+          IpProtocol: -1
+          CidrIp: !Ref HomeCidr
+      Tags:
+        - Key: Name
+          Value: Home
+
+  HomeSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref HomeSecurityGroup
+      Description: Loop
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref HomeSecurityGroup
+
+  OtherRegionsFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: VPC not required.
+          - id: W92
+            reason: Reserved concurrency not required.
+    Properties:
+      Runtime: python3.9
+      Handler: index.handler
+      InlineCode: |
+        import cfnresponse
+        import ctypes
+        def handler(event, context):
+            try:
+                if event['RequestType'] == 'Delete':
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, None)
+                else:
+                    props = event["ResourceProperties"]
+                    regions = props['StackSetDeployedRegions'].split(',')
+                    regions.remove(props['Region'])
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, ','.join(regions))
+            except Exception as ex:
+                cfnresponse.send(event, context, cfnresponse.FAILED, None, context.aws_request_id)
+                raise
+
+  OtherRegions:
+    Type: Custom::Cidr
+    Properties:
+      ServiceToken: !GetAtt OtherRegionsFunction.Arn
+      StackSetDeployedRegions: !Join [',', !Ref StackSetDeployedRegions]
+      Region: !Ref AWS::Region
+
+  TgwRouteStack:
+    Type: AWS::CloudFormation::Stack
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/tgw-routes.template
+      Parameters:
+        Name: !Ref Name
+        HomeCidr: !Ref HomeCidr
+        OtherRegions: !Ref OtherRegions
+        VpnRegion: !Ref VpnRegion
+
+  AzRouteStack:
+    Type: AWS::CloudFormation::Stack
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Count: !Ref AzCount
+    Properties:
+      TemplateURL: !Sub https://${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/templates/az-routes.template
+      Parameters:
+        Name: !Ref Name
+        AzNumber: '%d'
+        HomeCidr: !Ref HomeCidr
+        OtherRegions: !Ref OtherRegions
+
+Outputs:
+
+  HomeSecurityGroupId:
+    Export:
+      Name: !Sub ${Name}-HomeSecurityGroupId
+    Value: !Ref HomeSecurityGroup

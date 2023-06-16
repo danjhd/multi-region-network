@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Transform:
+  - Count
+
+Parameters:
+
+  Name:
+    Type: String
+
+  HomeCidr:
+    Type: String
+
+  OtherRegions:
+    Type: CommaDelimitedList
+
+  VpnRegion:
+    Type: String
+
+Conditions:
+
+  NotInVpnRegion: !Not [!Equals [ !Ref VpnRegion, !Ref 'AWS::Region']]
+
+Resources:
+
+  TransitGatewayAttachmentIdVpnRegion:
+    Type: Custom::TransitGatewayAttachmentId
+    Condition: NotInVpnRegion
+    Properties:
+      ServiceToken: !ImportValue Boto3FunctionArn
+      Region: !Ref AWS::Region
+      Service: ec2
+      Action: describe_transit_gateway_peering_attachments
+      Parameters:
+        Filters:
+          - Name: 'tag:Name'
+            Values:
+              - !Sub AWS - ${VpnRegion}
+      PhysicalResourceId:
+        ResponsePath: 'TransitGatewayPeeringAttachments[0].TransitGatewayAttachmentId'
+
+  RouteVpcHome:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      TransitGatewayRouteTableId:
+        'Fn::ImportValue': !Sub ${Name}-VpcRouteTableId
+      DestinationCidrBlock: !Ref HomeCidr
+      TransitGatewayAttachmentId: !If
+        - NotInVpnRegion
+        - !Ref TransitGatewayAttachmentIdVpnRegion
+        - 'Fn::ImportValue': !Sub ${Name}-VpnTransitGatewayAttachmentId
+
+  RoutePeerHome:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      TransitGatewayRouteTableId:
+        'Fn::ImportValue': !Sub ${Name}-PeerRouteTableId
+      DestinationCidrBlock: !Ref HomeCidr
+      TransitGatewayAttachmentId: !If
+        - NotInVpnRegion
+        - !Ref TransitGatewayAttachmentIdVpnRegion
+        - 'Fn::ImportValue': !Sub ${Name}-VpnTransitGatewayAttachmentId
+
+  VpcCidrRegion:
+    Type: Custom::VpcCidrRegion
+    Count: !Ref OtherRegions
+    Properties:
+      ServiceToken: !ImportValue Boto3FunctionArn
+      Region: '%s'
+      Service: ec2
+      Action: describe_vpcs
+      Parameters:
+        Filters:
+          - Name: 'tag:Name'
+            Values:
+              - !Sub ${Name}-%s/Vpc
+      PhysicalResourceId:
+        ResponsePath: 'Vpcs[0].CidrBlock'
+
+  TransitGatewayAttachmentIdRegion:
+    Type: Custom::TransitGatewayAttachmentId
+    Count: !Ref OtherRegions
+    Properties:
+      ServiceToken: !ImportValue Boto3FunctionArn
+      Region: !Ref AWS::Region
+      Service: ec2
+      Action: describe_transit_gateway_peering_attachments
+      Parameters:
+        Filters:
+          - Name: 'tag:Name'
+            Values:
+              - AWS - %s
+      PhysicalResourceId:
+        ResponsePath: 'TransitGatewayPeeringAttachments[0].TransitGatewayAttachmentId'
+
+  RouteVpc:
+    Type: AWS::EC2::TransitGatewayRoute
+    Count: !Ref OtherRegions
+    Properties:
+      TransitGatewayRouteTableId:
+        'Fn::ImportValue': !Sub ${Name}-VpcRouteTableId
+      DestinationCidrBlock: !Ref VpcCidrRegion%d
+      TransitGatewayAttachmentId: !Ref TransitGatewayAttachmentIdRegion%d
+
+  RouteVpn:
+    Type: AWS::EC2::TransitGatewayRoute
+    Count: !Ref OtherRegions
+    Properties:
+      TransitGatewayRouteTableId:
+        'Fn::ImportValue': !Sub ${Name}-VpnRouteTableId
+      DestinationCidrBlock: !Ref VpcCidrRegion%d
+      TransitGatewayAttachmentId: !Ref TransitGatewayAttachmentIdRegion%d
+
+  RoutePeer:
+    Type: AWS::EC2::TransitGatewayRoute
+    Count: !Ref OtherRegions
+    Properties:
+      TransitGatewayRouteTableId:
+        'Fn::ImportValue': !Sub ${Name}-PeerRouteTableId
+      DestinationCidrBlock: !Ref VpcCidrRegion%d
+      TransitGatewayAttachmentId: !Ref TransitGatewayAttachmentIdRegion%d
